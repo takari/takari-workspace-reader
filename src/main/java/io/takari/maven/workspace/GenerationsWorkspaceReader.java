@@ -53,15 +53,25 @@ import org.eclipse.aether.util.artifact.ArtifactIdUtils;
 public class GenerationsWorkspaceReader implements WorkspaceReader {
   private static final Collection<String> COMPILE_PHASE_TYPES = Arrays.asList("jar", "ejb-client");
 
-  private Map<String, MavenProject> activeProjectMapByGAV;
+  private Map<String, MavenProject> buildProjects;
 
-  private Map<String, List<MavenProject>> projectsByGA;
+  private Map<String, List<MavenProject>> buildProjectsByGA;
 
   private WorkspaceRepository repository;
   //
-  // Allow unresolved artifacts, artifacts without a file, to be resolved in the reactor
+  // Allow unresolved artifacts, artifacts without a file, to be resolved in the reactor. This will be for projects that
+  // that have been specified for the build.
   //
   private boolean allowArtifactsWithoutAFileToBeResolvedInTheReactor = true;
+
+  //
+  // We allow resolution from projects that are specified for the workspace.
+  //
+  private boolean workspaceResolutionEnabled = true;
+
+  private Map<String, MavenProject> workspaceProjects;
+
+  private Map<String, List<MavenProject>> workspaceProjectsByGA;
 
   @Inject
   public GenerationsWorkspaceReader(MavenSession session) {
@@ -71,20 +81,44 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
       allowArtifactsWithoutAFileToBeResolvedInTheReactor = Boolean.parseBoolean(forceArtifactResolutionFromReactor);
     }
 
-    activeProjectMapByGAV = session.getProjectMap();
-    projectsByGA = new HashMap<String, List<MavenProject>>();
+    String resolveFromWorkspaceProperty = session.getSystemProperties().getProperty("maven.workspaceResolutionEnabled");
+    if (resolveFromWorkspaceProperty != null && resolveFromWorkspaceProperty.equals("true")) {
+      workspaceResolutionEnabled = Boolean.parseBoolean(resolveFromWorkspaceProperty);
+    }
 
-    for (MavenProject project : activeProjectMapByGAV.values()) {
+    //
+    // Buildspace
+    //
+    buildProjects = session.getProjectMap();
+    buildProjectsByGA = new HashMap<String, List<MavenProject>>();
+
+    for (MavenProject project : buildProjects.values()) {
       String key = ArtifactUtils.versionlessKey(project.getGroupId(), project.getArtifactId());
-      List<MavenProject> projects = projectsByGA.get(key);
+      List<MavenProject> projects = buildProjectsByGA.get(key);
       if (projects == null) {
         projects = new ArrayList<MavenProject>(1);
-        projectsByGA.put(key, projects);
+        buildProjectsByGA.put(key, projects);
       }
       projects.add(project);
     }
 
-    repository = new WorkspaceRepository("reactor", new HashSet<String>(activeProjectMapByGAV.keySet()));
+    //
+    // Workspace
+    //
+    workspaceProjects = getProjectMap(session.getAllProjects());
+    workspaceProjectsByGA = new HashMap<String, List<MavenProject>>();
+
+    for (MavenProject project : workspaceProjects.values()) {
+      String key = ArtifactUtils.versionlessKey(project.getGroupId(), project.getArtifactId());
+      List<MavenProject> projects = workspaceProjectsByGA.get(key);
+      if (projects == null) {
+        projects = new ArrayList<MavenProject>(1);
+        workspaceProjectsByGA.put(key, projects);
+      }
+      projects.add(project);
+    }
+
+    repository = new WorkspaceRepository("reactor", new HashSet<String>(buildProjects.keySet()));
   }
 
   //
@@ -95,37 +129,61 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
   }
 
   public File findArtifact(Artifact artifact) {
+
+    File file = null;
+
     String projectKey = ArtifactUtils.key(artifact.getGroupId(), artifact.getArtifactId(), artifact.getVersion());
 
-    // Find the MavenProject that this artifact being requested belongs to
-    MavenProject project = activeProjectMapByGAV.get(projectKey);
+    //
+    // Try to resolve the project from the buildspace, which are the projects that have been requested to build
+    //
+    MavenProject project = buildProjects.get(projectKey);
 
     if (project != null) {
-      File file = find(project, artifact);
-      if (file == null && project != project.getExecutionProject()) {
-        file = find(project.getExecutionProject(), artifact);
-      }
-      return file;
+      file = find(project, artifact);
     }
-    return null;
+
+    //
+    // If workspace resolution is enabled and the project cannot be found in the buildspace then attempt to
+    // find the project in the workspace.
+    //
+    if (file == null && workspaceResolutionEnabled) {
+      project = workspaceProjects.get(projectKey);
+      if (project != null) {
+        file = findWorkspaceArtifact(project, artifact);
+      }
+    }
+
+    return file;
   }
 
   public List<String> findVersions(Artifact artifact) {
-    String key = ArtifactUtils.versionlessKey(artifact.getGroupId(), artifact.getArtifactId());
-
-    List<MavenProject> projects = projectsByGA.get(key);
-    if (projects == null || projects.isEmpty()) {
-      return Collections.emptyList();
-    }
 
     List<String> versions = new ArrayList<String>();
+    String key = ArtifactUtils.versionlessKey(artifact.getGroupId(), artifact.getArtifactId());
+    List<MavenProject> projects = buildProjectsByGA.get(key);
 
-    for (MavenProject project : projects) {
-      File artifactFile = find(project, artifact);
-      if (artifactFile != null) {
-        versions.add(project.getVersion());
+    if (projects != null) {
+      for (MavenProject project : projects) {
+        File artifactFile = find(project, artifact);
+        if (artifactFile != null) {
+          versions.add(project.getVersion());
+        }
       }
     }
+
+    if (versions.isEmpty() && workspaceResolutionEnabled) {
+      projects = workspaceProjectsByGA.get(key);
+      if (projects != null) {
+        for (MavenProject project : projects) {
+          File artifactFile = findWorkspaceArtifact(project, artifact);
+          if (artifactFile != null) {
+            versions.add(project.getVersion());
+          }
+        }
+      }
+    }
+
     return Collections.unmodifiableList(versions);
   }
 
@@ -139,7 +197,10 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
       return project.getFile();
     }
 
-    // project = project where we will find artifact
+    //
+    // project = project where we will find artifact, this may be the primary artifact or any of the 
+    // secondary artifacts
+    //
     Artifact projectArtifact = findMatchingArtifact(project, artifact);
 
     if (hasArtifactFileFromPackagePhase(projectArtifact)) {
@@ -195,6 +256,79 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     return file;
   }
 
+  private File findWorkspaceArtifact(MavenProject project, Artifact artifact) {
+    File file = null;
+
+    if ("pom".equals(artifact.getExtension())) {
+      return project.getFile();
+    }
+
+    //
+    // project = project where we will find artifact, this may be the primary artifact or any of the 
+    // secondary artifacts
+    //
+    Artifact projectArtifact = findMatchingArtifact(project, artifact);
+
+    if (hasArtifactFileFromPackagePhase(projectArtifact)) {
+      //
+      // We have gone far enough in the lifecycle to produce a JAR, WAR, or other file-based artifact
+      //
+      if (isTestArtifact(artifact)) {
+        //
+        // We are looking for a test JAR foo-1.0-test.jar
+        //
+        file = new File(project.getBuild().getDirectory(), String.format("%s-%s-tests.jar", project.getArtifactId(), project.getVersion()));
+      } else {
+        //
+        // We are looking for an application JAR foo-1.0.jar
+        //
+        file = projectArtifact.getFile();
+      }
+    } else if (!hasBeenPackaged(project)) {
+      //
+      // Here no file has been produced so we fallback to loose class files only if artifacts haven't been packaged yet
+      // and only for plain old jars. Not war files, not ear files, not anything else.
+      //                    
+      String type = artifact.getProperty("type", "");
+
+      if (isTestArtifact(artifact)) {
+        if (project.hasLifecyclePhase("test-compile")) {
+          file = new File(project.getBuild().getTestOutputDirectory());
+        }
+      } else if (project.hasLifecyclePhase("compile") && COMPILE_PHASE_TYPES.contains(type)) {
+        file = new File(project.getBuild().getOutputDirectory());
+      }
+      if (file == null && allowArtifactsWithoutAFileToBeResolvedInTheReactor) {
+        //
+        // There is no elegant way to signal that the Artifact's representation is actually present in the 
+        // reactor but that it has no file-based representation during this execution and may, in fact, not
+        // require one. The case this accounts for something I am doing with Eclipse project file
+        // generation where I can perform dependency resolution, but cannot run any lifecycle phases.
+        // I need the in-reactor references to work correctly. The WorkspaceReader interface needs
+        // to be changed to account for this. This is not exactly elegant, but it's turned on
+        // with a property and should not interfere.
+        // 
+        
+        /*
+        
+        Turn off resolving for now
+        
+        file = new File(project.getBuild().getOutputDirectory());
+        if (file.exists() == false) {
+          file = new File(".");
+        }
+        
+        */
+      }
+    }
+
+    //
+    // The fall-through indicates that the artifact cannot be found;
+    // for instance if package produced nothing or classifier problems.
+    //
+    return file;
+  }
+
   private boolean hasArtifactFileFromPackagePhase(Artifact projectArtifact) {
     return projectArtifact != null && projectArtifact.getFile() != null && projectArtifact.getFile().exists();
   }
@@ -206,27 +340,17 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     return project.hasLifecyclePhase("package") || project.hasLifecyclePhase("install") || project.hasLifecyclePhase("deploy");
   }
 
-  /**
-   * Tries to resolve the specified artifact from the artifacts of the given project.
-   * 
-   * @param project The project to try to resolve the artifact from, must not be <code>null</code>.
-   * @param requestedArtifact The artifact to resolve, must not be <code>null</code>.
-   * @return The matching artifact from the project or <code>null</code> if not found. Note that this
-   */
   private Artifact findMatchingArtifact(MavenProject project, Artifact requestedArtifact) {
-    String requestedRepositoryConflictId = ArtifactIdUtils.toVersionlessId(requestedArtifact);
-
+    String versionlessId = ArtifactIdUtils.toVersionlessId(requestedArtifact);
     Artifact mainArtifact = RepositoryUtils.toArtifact(project.getArtifact());
-    if (requestedRepositoryConflictId.equals(ArtifactIdUtils.toVersionlessId(mainArtifact))) {
+    if (versionlessId.equals(ArtifactIdUtils.toVersionlessId(mainArtifact))) {
       return mainArtifact;
     }
-
     for (Artifact attachedArtifact : RepositoryUtils.toArtifacts(project.getAttachedArtifacts())) {
       if (attachedArtifactComparison(requestedArtifact, attachedArtifact)) {
         return attachedArtifact;
       }
     }
-
     return null;
   }
 
@@ -278,14 +402,12 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     }
 
     /*
-
-    We'll assume there is no collisions
-    
-    if (!collisions.isEmpty()) {
-      throw new DuplicateProjectException("Two or more projects in the reactor" + " have the same identifier, please make sure that <groupId>:<artifactId>:<version>" + " is unique for each project: "
-          + collisions, collisions);
-    }
-    */
+     * 
+     * We'll assume there is no collisions
+     * 
+     * if (!collisions.isEmpty()) { throw new DuplicateProjectException("Two or more projects in the reactor" + " have the same identifier, please make sure that <groupId>:<artifactId>:<version>" +
+     * " is unique for each project: " + collisions, collisions); }
+     */
 
     return index;
   }
