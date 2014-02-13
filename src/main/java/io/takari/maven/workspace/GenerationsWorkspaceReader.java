@@ -67,7 +67,7 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
   //
   // We allow resolution from projects that are specified for the workspace.
   //
-  private boolean workspaceResolutionEnabled = true;
+  private boolean workspaceResolutionEnabled = false;
 
   private Map<String, MavenProject> workspaceProjects;
 
@@ -81,11 +81,14 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
       allowArtifactsWithoutAFileToBeResolvedInTheReactor = Boolean.parseBoolean(forceArtifactResolutionFromReactor);
     }
 
+    //
+    // Right now this is only enabled for the maven-eclipse-plugin
+    //
     String resolveFromWorkspaceProperty = session.getSystemProperties().getProperty("maven.workspaceResolutionEnabled");
     if (resolveFromWorkspaceProperty != null && resolveFromWorkspaceProperty.equals("true")) {
       workspaceResolutionEnabled = Boolean.parseBoolean(resolveFromWorkspaceProperty);
     }
-
+    
     //
     // Buildspace
     //
