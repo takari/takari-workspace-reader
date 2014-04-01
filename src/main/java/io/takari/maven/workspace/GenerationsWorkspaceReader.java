@@ -244,11 +244,15 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
         // I need the in-reactor references to work correctly. The WorkspaceReader interface needs
         // to be changed to account for this. This is not exactly elegant, but it's turned on
         // with a property and should not interfere.
-        // 
+        //
+        // We have made a slight change in that we don't want to return "." because it confuses the 
+        // compiler plugin for special cases that we have where we are running the compiler in the
+        // process-resources phase.
+        //
         file = new File(project.getBuild().getOutputDirectory());
-        if (file.exists() == false) {
-          file = new File(".");
-        }
+        //if (file.exists() == false) {
+        //  file = new File(".");
+        //}
       }
     }
 
