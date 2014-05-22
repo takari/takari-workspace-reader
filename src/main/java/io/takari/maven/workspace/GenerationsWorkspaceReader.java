@@ -48,7 +48,7 @@ import org.eclipse.aether.util.artifact.ArtifactIdUtils;
  * 
  * @author Jason van Zyl
  */
-@Named
+@Named("reactor")
 @SessionScoped
 public class GenerationsWorkspaceReader implements WorkspaceReader {
   private static final Collection<String> COMPILE_PHASE_TYPES = Arrays.asList("jar", "ejb-client");
