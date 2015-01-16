@@ -19,6 +19,9 @@ package io.takari.maven.workspace;
  * under the License.
  */
 
+import io.takari.generation.maven.graph.MavenProjectGraph;
+import io.takari.generation.maven.graph.ProjectGraph;
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -67,7 +70,7 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
   //
   // We allow resolution from projects that are specified for the workspace.
   //
-  private boolean workspaceResolutionEnabled = false;
+  private boolean workspaceResolutionEnabled = true;
 
   private Map<String, MavenProject> workspaceProjects;
 
@@ -108,7 +111,9 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     //
     // Workspace
     //
-    workspaceProjects = getProjectMap(session.getAllProjects());
+    final ProjectGraph graph = ((MavenProjectGraph) session.getProjectDependencyGraph()).getProjectGraph();
+    
+    workspaceProjects = getProjectMap( graph.getMavenProjects() );
     workspaceProjectsByGA = new HashMap<String, List<MavenProject>>();
 
     for (MavenProject project : workspaceProjects.values()) {
@@ -385,7 +390,7 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     return ("test-jar".equals(artifact.getProperty("type", ""))) || ("jar".equals(artifact.getExtension()) && "tests".equals(artifact.getClassifier()));
   }
 
-  private Map<String, MavenProject> getProjectMap(Collection<MavenProject> projects) {
+  private Map<String, MavenProject> getProjectMap(Iterable<MavenProject> projects) {
     Map<String, MavenProject> index = new LinkedHashMap<String, MavenProject>();
     Map<String, List<File>> collisions = new LinkedHashMap<String, List<File>>();
 

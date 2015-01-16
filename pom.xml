@@ -13,7 +13,7 @@
 
   <properties>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-    <mavenVersion>3.2.5</mavenVersion>
+    <mavenVersion>3.2.4-SNAPSHOT</mavenVersion>
   </properties>
 
   <dependencies>
@@ -40,6 +40,12 @@
       <artifactId>junit</artifactId>
       <version>4.11</version>
       <scope>test</scope>
+    </dependency>
+    <dependency>
+    	<groupId>io.takari.generations</groupId>
+    	<artifactId>generations-graph-builder</artifactId>
+    	<version>0.1.9-SNAPSHOT</version>
+    	<scope>provided</scope>
     </dependency>
   </dependencies>
 
