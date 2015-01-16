@@ -19,17 +19,12 @@ package io.takari.maven.workspace;
  * under the License.
  */
 
-import io.takari.generation.maven.graph.MavenProjectGraph;
-import io.takari.generation.maven.graph.ProjectGraph;
-
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -40,11 +35,20 @@ import org.apache.maven.RepositoryUtils;
 import org.apache.maven.SessionScoped;
 import org.apache.maven.artifact.ArtifactUtils;
 import org.apache.maven.execution.MavenSession;
+import org.apache.maven.execution.ProjectDependencyGraph;
+import org.apache.maven.project.BuildProjectGraph;
+import org.apache.maven.project.GenerationsProjectGraph;
 import org.apache.maven.project.MavenProject;
+import org.apache.maven.project.SourceProjectGraph;
 import org.eclipse.aether.artifact.Artifact;
 import org.eclipse.aether.repository.WorkspaceReader;
 import org.eclipse.aether.repository.WorkspaceRepository;
 import org.eclipse.aether.util.artifact.ArtifactIdUtils;
+
+import com.google.common.base.Function;
+import com.google.common.collect.Maps;
+import com.google.common.collect.Multimap;
+import com.google.common.collect.Multimaps;
 
 /**
  * An implementation of a workspace reader that knows how to search the Maven reactor for artifacts.
@@ -54,30 +58,39 @@ import org.eclipse.aether.util.artifact.ArtifactIdUtils;
 @Named("reactor")
 @SessionScoped
 public class GenerationsWorkspaceReader implements WorkspaceReader {
+
+  static {
+    try {
+      Class.forName("org.apache.maven.project.GenerationsProjectGraph");
+    } catch (ClassNotFoundException e) {
+      throw new RuntimeException("Required takari graph build extension not installed", e);
+    }
+  }
+
   private static final Collection<String> COMPILE_PHASE_TYPES = Arrays.asList("jar", "ejb-client");
 
-  private Map<String, MavenProject> buildProjects;
-
-  private Map<String, List<MavenProject>> buildProjectsByGA;
-
   private WorkspaceRepository repository;
-  //
-  // Allow unresolved artifacts, artifacts without a file, to be resolved in the reactor. This will be for projects that
-  // that have been specified for the build.
-  //
+
   private boolean allowArtifactsWithoutAFileToBeResolvedInTheReactor = true;
 
-  //
-  // We allow resolution from projects that are specified for the workspace.
-  //
-  private boolean workspaceResolutionEnabled = true;
+  // the graph builder currently only supports one project per GA. But leave support for multiple in case we can support it.
 
-  private Map<String, MavenProject> workspaceProjects;
+  private final Map<String, MavenProject> buildProjects;
+  private final Multimap<String, MavenProject> buildProjectsByGA;
 
-  private Map<String, List<MavenProject>> workspaceProjectsByGA;
+  private final Map<String, MavenProject> workspaceProjects;
+  private final Multimap<String, MavenProject> workspaceProjectsByGA;
+
+  private final Map<String, MavenProject> binaryProjects;
+  private final Multimap<String, MavenProject> binaryProjectsByGA;
 
   @Inject
   public GenerationsWorkspaceReader(MavenSession session) {
+    final ProjectDependencyGraph activeProjectGraph = session.getProjectDependencyGraph();
+    if (!(session.getProjectDependencyGraph() instanceof GenerationsProjectGraph)) {
+      throw new RuntimeException("Required takari graph builder extension not activated");
+    }
+    final GenerationsProjectGraph projectGraph = (GenerationsProjectGraph) activeProjectGraph;
 
     String forceArtifactResolutionFromReactor = session.getSystemProperties().getProperty("maven.forceArtifactResolutionFromReactor");
     if (forceArtifactResolutionFromReactor != null && forceArtifactResolutionFromReactor.equals("true")) {
@@ -85,48 +98,30 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     }
 
     //
-    // Right now this is only enabled for the maven-eclipse-plugin
-    //
-    String resolveFromWorkspaceProperty = session.getSystemProperties().getProperty("maven.workspaceResolutionEnabled");
-    if (resolveFromWorkspaceProperty != null && resolveFromWorkspaceProperty.equals("true")) {
-      workspaceResolutionEnabled = Boolean.parseBoolean(resolveFromWorkspaceProperty);
-    }
-    
-    //
     // Buildspace
     //
-    buildProjects = session.getProjectMap();
-    buildProjectsByGA = new HashMap<String, List<MavenProject>>();
-
-    for (MavenProject project : buildProjects.values()) {
-      String key = ArtifactUtils.versionlessKey(project.getGroupId(), project.getArtifactId());
-      List<MavenProject> projects = buildProjectsByGA.get(key);
-      if (projects == null) {
-        projects = new ArrayList<MavenProject>(1);
-        buildProjectsByGA.put(key, projects);
-      }
-      projects.add(project);
-    }
+    final BuildProjectGraph buildGraph = projectGraph.getBuildGraph();
+    final Iterable<MavenProject> buildProjects = projectGraph.toProjects(buildGraph.getNodes());
+    this.buildProjects = Maps.uniqueIndex(buildProjects, getGAV);
+    this.buildProjectsByGA = Multimaps.index(buildProjects, getGA);
 
     //
     // Workspace
     //
-    final ProjectGraph graph = ((MavenProjectGraph) session.getProjectDependencyGraph()).getProjectGraph();
-    
-    workspaceProjects = getProjectMap( graph.getMavenProjects() );
-    workspaceProjectsByGA = new HashMap<String, List<MavenProject>>();
+    final Iterable<MavenProject> workspaceProjects = projectGraph.toProjects(buildGraph.getExcludedNodes());
+    this.workspaceProjects = Maps.uniqueIndex(workspaceProjects, getGAV);
+    this.workspaceProjectsByGA = Multimaps.index(workspaceProjects, getGA);
 
-    for (MavenProject project : workspaceProjects.values()) {
-      String key = ArtifactUtils.versionlessKey(project.getGroupId(), project.getArtifactId());
-      List<MavenProject> projects = workspaceProjectsByGA.get(key);
-      if (projects == null) {
-        projects = new ArrayList<MavenProject>(1);
-        workspaceProjectsByGA.put(key, projects);
-      }
-      projects.add(project);
-    }
+    //
+    // Jarspace
+    // TODO: move jar download here?
+    //
+    final SourceProjectGraph sourceGraph = buildGraph.getSourceGraph();
+    final Iterable<MavenProject> binaryProjects = projectGraph.toProjects(sourceGraph.getExcludedNodes());
+    this.binaryProjects = Maps.uniqueIndex(binaryProjects, getGAV);
+    this.binaryProjectsByGA = Multimaps.index(binaryProjects, getGA);
 
-    repository = new WorkspaceRepository("reactor", new HashSet<String>(buildProjects.keySet()));
+    repository = new WorkspaceRepository("reactor", new HashSet<String>(this.buildProjects.keySet()));
   }
 
   //
@@ -155,11 +150,17 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     // If workspace resolution is enabled and the project cannot be found in the buildspace then attempt to
     // find the project in the workspace.
     //
-    if (file == null && workspaceResolutionEnabled) {
+    if (file == null) {
       project = workspaceProjects.get(projectKey);
       if (project != null) {
         file = findWorkspaceArtifact(project, artifact);
       }
+    }
+
+    if (file == null) {
+      project = binaryProjects.get(projectKey);
+      if (project != null)
+        file = find(project, artifact);
     }
 
     return file;
@@ -169,7 +170,7 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
 
     List<String> versions = new ArrayList<String>();
     String key = ArtifactUtils.versionlessKey(artifact.getGroupId(), artifact.getArtifactId());
-    List<MavenProject> projects = buildProjectsByGA.get(key);
+    Collection<MavenProject> projects = buildProjectsByGA.get(key);
 
     if (projects != null) {
       for (MavenProject project : projects) {
@@ -180,8 +181,20 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
       }
     }
 
-    if (versions.isEmpty() && workspaceResolutionEnabled) {
+    if (versions.isEmpty()) {
       projects = workspaceProjectsByGA.get(key);
+      if (projects != null) {
+        for (MavenProject project : projects) {
+          File artifactFile = findWorkspaceArtifact(project, artifact);
+          if (artifactFile != null) {
+            versions.add(project.getVersion());
+          }
+        }
+      }
+    }
+
+    if (versions.isEmpty()) {
+      projects = binaryProjectsByGA.get(key);
       if (projects != null) {
         for (MavenProject project : projects) {
           File artifactFile = findWorkspaceArtifact(project, artifact);
@@ -390,37 +403,18 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     return ("test-jar".equals(artifact.getProperty("type", ""))) || ("jar".equals(artifact.getExtension()) && "tests".equals(artifact.getClassifier()));
   }
 
-  private Map<String, MavenProject> getProjectMap(Iterable<MavenProject> projects) {
-    Map<String, MavenProject> index = new LinkedHashMap<String, MavenProject>();
-    Map<String, List<File>> collisions = new LinkedHashMap<String, List<File>>();
-
-    for (MavenProject project : projects) {
-      String projectId = ArtifactUtils.key(project.getGroupId(), project.getArtifactId(), project.getVersion());
-
-      MavenProject collision = index.get(projectId);
-
-      if (collision == null) {
-        index.put(projectId, project);
-      } else {
-        List<File> pomFiles = collisions.get(projectId);
-
-        if (pomFiles == null) {
-          pomFiles = new ArrayList<File>(Arrays.asList(collision.getFile(), project.getFile()));
-          collisions.put(projectId, pomFiles);
-        } else {
-          pomFiles.add(project.getFile());
-        }
-      }
+  private static final Function<MavenProject, String> getGAV = new Function<MavenProject, String>() {
+    @Override
+    public String apply(MavenProject project) {
+      return ArtifactUtils.key(project.getGroupId(), project.getArtifactId(), project.getVersion());
     }
+  };
 
-    /*
-     * 
-     * We'll assume there is no collisions
-     * 
-     * if (!collisions.isEmpty()) { throw new DuplicateProjectException("Two or more projects in the reactor" + " have the same identifier, please make sure that <groupId>:<artifactId>:<version>" +
-     * " is unique for each project: " + collisions, collisions); }
-     */
+  private static final Function<MavenProject, String> getGA = new Function<MavenProject, String>() {
+    @Override
+    public String apply(MavenProject project) {
+      return ArtifactUtils.versionlessKey(project.getGroupId(), project.getArtifactId());
+    }
+  };
 
-    return index;
-  }
 }
