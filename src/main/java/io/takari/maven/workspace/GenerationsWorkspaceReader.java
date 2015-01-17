@@ -101,14 +101,14 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     // Buildspace
     //
     final BuildProjectGraph buildGraph = projectGraph.getBuildGraph();
-    final Iterable<MavenProject> buildProjects = projectGraph.toProjects(buildGraph.getNodes());
+    final Iterable<MavenProject> buildProjects = projectGraph.toMavenProjects(buildGraph.getNodes());
     this.buildProjects = Maps.uniqueIndex(buildProjects, getGAV);
     this.buildProjectsByGA = Multimaps.index(buildProjects, getGA);
 
     //
     // Workspace
     //
-    final Iterable<MavenProject> workspaceProjects = projectGraph.toProjects(buildGraph.getExcludedNodes());
+    final Iterable<MavenProject> workspaceProjects = projectGraph.toMavenProjects(buildGraph.getExcludedNodes());
     this.workspaceProjects = Maps.uniqueIndex(workspaceProjects, getGAV);
     this.workspaceProjectsByGA = Multimaps.index(workspaceProjects, getGA);
 
@@ -117,7 +117,7 @@ public class GenerationsWorkspaceReader implements WorkspaceReader {
     // TODO: move jar download here?
     //
     final SourceProjectGraph sourceGraph = buildGraph.getSourceGraph();
-    final Iterable<MavenProject> binaryProjects = projectGraph.toProjects(sourceGraph.getExcludedNodes());
+    final Iterable<MavenProject> binaryProjects = projectGraph.toMavenProjects(sourceGraph.getExcludedNodes());
     this.binaryProjects = Maps.uniqueIndex(binaryProjects, getGAV);
     this.binaryProjectsByGA = Multimaps.index(binaryProjects, getGA);
 
